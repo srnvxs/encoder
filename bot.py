@@ -554,7 +554,7 @@ async def on_cb(client, cq):
 
 
 # Admin text handler: used to set numeric fields or add token
-@app.on_message(filters.private & filters.user(*ADMINS) & filters.text)
+@app.on_message(filters.private & filters.user(ADMINS) & filters.text)
 async def admin_text(client, message):
     text = message.text.strip()
     # try to interpret as integer
