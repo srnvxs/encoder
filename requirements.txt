@@ -1,8 +1,9 @@
 pyrogram
-tgcrypto
-motor
-aiohttp
-python-dotenv
+tgcrypto 
+aiohttp 
+aiofiles 
+python-dotenv 
+shortzy 
+pytz 
 uvicorn
-fastapi
-pydantic
+fastapi 
