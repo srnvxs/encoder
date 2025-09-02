@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-bot_single.py
-A single-file Telegram video processing bot:
-- Pyrogram async bot
+bot_single_fixed.py
+Single-file Telegram video processing bot (fixed & cleaned).
+- Pyrogram (async)
 - Motor (MongoDB)
-- Async FFmpeg (subprocess) with -progress pipe:1 parsing
-- Inline UI for settings and operations
-- Per-task logs, FastAPI token-protected API, shortener with timeout
-- Auth: ADMINS + AUTH_GROUP
+- Async ffmpeg with -progress pipe:1 parsing
+- Inline UI, per-task logs, FastAPI API, shortener, auth, admin
 """
 
 import os
@@ -19,7 +17,7 @@ import logging
 import uuid
 from typing import Optional, List, Dict, Any, Callable
 
-# Third-party
+# Third-party libs
 try:
     from dotenv import load_dotenv
     from pyrogram import Client, filters
@@ -29,7 +27,7 @@ try:
     from fastapi import FastAPI, Header, HTTPException
     import uvicorn
 except Exception as e:
-    print("Missing dependencies. Run: pip install -r requirements.txt")
+    print("Missing dependencies. Install with: pip install -r requirements.txt")
     raise
 
 # ---------------------------
@@ -47,8 +45,8 @@ DB_NAME = os.getenv("DB_NAME", "video_bot_single")
 
 # Admins, log channel, auth group
 ADMINS = [int(x) for x in os.getenv("ADMINS", "").split(",") if x.strip().isdigit()]
-LOG_CHANNEL = int(os.getenv("LOG_CHANNEL", "0")) if os.getenv("LOG_CHANNEL") else None
-AUTH_GROUP = int(os.getenv("AUTH_GROUP", "0")) if os.getenv("AUTH_GROUP") else None
+LOG_CHANNEL = int(os.getenv("LOG_CHANNEL")) if os.getenv("LOG_CHANNEL") else None
+AUTH_GROUP = int(os.getenv("AUTH_GROUP")) if os.getenv("AUTH_GROUP") else None
 
 # Shortener config
 SHORTENER_API = os.getenv("SHORTENER_API", "")
@@ -68,10 +66,11 @@ if not (API_ID and API_HASH and BOT_TOKEN):
     sys.exit(1)
 
 # ---------------------------
-# Logging & dirs
+# Logging & directories
 # ---------------------------
-LOGS_DIR = os.path.join(os.path.dirname(__file__), "logs")
-DOWNLOADS_DIR = os.path.join(os.path.dirname(__file__), "downloads")
+BASE_DIR = os.path.dirname(__file__)
+LOGS_DIR = os.path.join(BASE_DIR, "logs")
+DOWNLOADS_DIR = os.path.join(BASE_DIR, "downloads")
 os.makedirs(LOGS_DIR, exist_ok=True)
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 
@@ -204,7 +203,6 @@ async def shorten_url(url: str, api: Optional[str] = None, token: Optional[str] 
             async with sess.post(api, json={"url": url}, headers=headers, timeout=timeout) as resp:
                 try:
                     j = await resp.json()
-                    # Try common fields
                     if isinstance(j, dict):
                         for key in ("result", "shorturl", "short_url", "link", "url"):
                             if key in j:
@@ -262,7 +260,6 @@ async def build_ffmpeg_cmd(input_path: str, output_path: str, quality: int = 720
         for s in audio_streams:
             maps += ["-map", f"0:{s.get('index')}"]
     else:
-        # compare lowercase languages
         want = [k.lower() for k in keep_audio]
         for s in audio_streams:
             tags = s.get("tags") or {}
@@ -303,7 +300,6 @@ class FFmpegProgressParser:
                 if self.on_update:
                     await maybe_async(self.on_update, 100.0, self.data.copy())
                 break
-            # compute percent
             out_ms = self.data.get("out_time_ms")
             if out_ms and self.duration:
                 try:
@@ -340,7 +336,6 @@ async def run_ffmpeg_task(task_id: str, input_path: str, output_path: str, quali
         return 127
     parser = FFmpegProgressParser(duration=duration, on_update=on_progress)
     feed_task = asyncio.create_task(parser.feed(proc.stdout))
-    # drain stderr
     async def drain(reader):
         try:
             while True:
@@ -409,17 +404,15 @@ async def handle_photo(client, message: Message):
     pending = await get_pending(message.from_user.id)
     if pending == "save_thumb":
         # save largest photo file_id
-        sizes = message.photo
-        file_id = sizes.file_id
+        file_id = message.photo.file_id
         await set_user_config(message.from_user.id, {"thumbnail_file_id": file_id})
         await set_pending(message.from_user.id, None)
         await message.reply_text("Thumbnail saved.")
     else:
-        # ignore
         pass
 
 
-# Media handler accepts both document and video
+# Media handler accepts both document and video (authorize)
 @app.on_message((filters.video | filters.document) & (filters.private | auth_filter()))
 async def media_handler(client, message: Message):
     bot_conf = await ensure_bot_config()
@@ -429,6 +422,8 @@ async def media_handler(client, message: Message):
     if size and size > max_size:
         await message.reply_text(f"File too large. Limit: {max_size} bytes")
         return
+
+    # create task record
     task_id = str(uuid.uuid4())
     rec = {
         "_id": task_id,
@@ -438,9 +433,16 @@ async def media_handler(client, message: Message):
         "file_id": doc.file_id,
         "file_size": size,
         "status": "options",
-        "created_at": int(asyncio.get_event_loop().time())
+        "created_at": int(asyncio.get_event_loop().time()),
+        "bot_msg_id": None
     }
     await create_task(rec)
+
+    # send a placeholder message we will edit for progress
+    bot_msg = await app.send_message(message.chat.id, "Choose quality and options (inline buttons will control the task).")
+    # save bot message id in task
+    await update_task(task_id, {"bot_msg_id": bot_msg.message_id})
+
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("360p", callback_data=f"q:{task_id}:360"), InlineKeyboardButton("480p", callback_data=f"q:{task_id}:480")],
         [InlineKeyboardButton("720p", callback_data=f"q:{task_id}:720"), InlineKeyboardButton("1080p", callback_data=f"q:{task_id}:1080")],
@@ -448,7 +450,7 @@ async def media_handler(client, message: Message):
         [InlineKeyboardButton("Keep ENG audio", callback_data=f"audio:{task_id}:eng"), InlineKeyboardButton("Keep ALL", callback_data=f"audio:{task_id}:all")],
         [InlineKeyboardButton("Start ▶", callback_data=f"start:{task_id}")]
     ])
-    await message.reply_text("Choose quality and options (all inline):", reply_markup=kb)
+    await app.edit_message_text(message.chat.id, bot_msg.message_id, "Choose quality and options (all inline):", reply_markup=kb)
 
 
 # Inline callback router
@@ -487,7 +489,13 @@ async def on_cb(client, cq):
             await cq.answer("Task not found", show_alert=True)
             return
         await cq.answer("Queued for processing")
-        await cq.message.edit_text("Queued — processing will begin shortly and progress will update here.")
+        # update placeholder text
+        bot_msg_id = task.get("bot_msg_id")
+        if bot_msg_id:
+            try:
+                await app.edit_message_text(task["chat_id"], bot_msg_id, "Queued — starting processing now. Progress will update here.")
+            except Exception:
+                pass
         # launch background
         asyncio.create_task(process_task(task_id))
         return
@@ -516,7 +524,6 @@ async def on_cb(client, cq):
         return
     if data == "u_set_audio":
         uid = cq.from_user.id
-        # quick demo: toggle between ENG / ALL
         conf = await get_user_config(uid)
         if conf.get("audio_keep"):
             await set_user_config(uid, {"audio_keep": []})
@@ -543,7 +550,6 @@ async def on_cb(client, cq):
             return
         await cq.message.edit_text("Send a message with the new integer value for max concurrent tasks.")
         await cq.answer("Send number in chat")
-        # admin message handler will set the value
         return
     if data == "a_max_size":
         if cq.from_user.id not in ADMINS:
@@ -574,8 +580,6 @@ async def on_cb(client, cq):
 @app.on_message(filters.private & filters.text & filters.user(ADMINS))
 async def admin_messages(client, message: Message):
     text = message.text.strip()
-    # try integer - ambiguous intent: check previous bot message in same chat to interpret
-    # Simpler approach: if text looks like a token (long string) -> add token, else try int and set max_concurrent_tasks
     if len(text) > 30 and " " not in text:
         # add as token
         try:
@@ -587,10 +591,8 @@ async def admin_messages(client, message: Message):
         except Exception as e:
             await message.reply_text(f"Failed to add token: {e}")
             return
-    # try parse int
     try:
         n = int(text)
-        # naive: set max_concurrent_tasks
         await db.bot_config.update_one({"_id": "bot"}, {"$set": {"max_concurrent_tasks": n}}, upsert=True)
         await message.reply_text(f"Updated max_concurrent_tasks to {n}")
         if LOG_CHANNEL:
@@ -613,7 +615,6 @@ async def process_task(task_id: str):
         tl.error("Task not found")
         return
     await update_task(task_id, {"status": "running"})
-    # read user config
     uid = task.get("user_id")
     user_conf = await get_user_config(uid) if uid else {}
     quality = task.get("selected_quality") or user_conf.get("default_quality", 720)
@@ -626,9 +627,8 @@ async def process_task(task_id: str):
     if keep_audio is None:
         keep_audio = user_conf.get("audio_keep", [])
     chat_id = task.get("chat_id")
-    msg_id = task.get("msg_id")
+    bot_msg_id = task.get("bot_msg_id")
     file_id = task.get("file_id")
-    # download
     input_path = os.path.join(DOWNLOADS_DIR, f"{task_id}_in")
     output_path = os.path.join(DOWNLOADS_DIR, f"{task_id}_out.mp4")
     try:
@@ -639,26 +639,22 @@ async def process_task(task_id: str):
         await update_task(task_id, {"status": "failed", "error": str(e)})
         return
     subtitle_path = None
-    # progress callback
     async def on_progress(percent: float, meta: dict):
         try:
-            # simple textual progress bar
             bars = 12
             filled = int(percent / 100.0 * bars)
             bar = "[" + "█" * filled + "-" * (bars - filled) + "]"
             text = f"Processing: {percent:.1f}%\n{bar}"
-            try:
-                await app.edit_message_text(chat_id, msg_id, text)
-            except Exception:
-                pass
+            if bot_msg_id:
+                try:
+                    await app.edit_message_text(chat_id, bot_msg_id, text)
+                except Exception:
+                    pass
             if percent and percent % 5 < 0.5:
                 await update_task(task_id, {"last_percent": percent})
         except Exception:
             pass
-    # get current bot config to respect concurrency and updating semaphore if changed
     bot_conf = await ensure_bot_config()
-    # adjust semaphore if max changed (best-effort)
-    # Note: Python's semaphore can't be resized easily; keep as-is for now
     try:
         async with concurrency_sem:
             rc = await run_ffmpeg_task(task_id, input_path, output_path, int(quality), bool(hardsub), subtitle_path, keep_audio, on_progress)
@@ -682,11 +678,9 @@ async def process_task(task_id: str):
         except Exception:
             pass
         return
-    # upload
     try:
         sent = await app.send_document(chat_id, output_path)
         file_url = f"https://t.me/{(await app.get_me()).username}/{sent.message_id}"
-        # attempt shortening (with timeout)
         short = await shorten_url(file_url, timeout=SHORTENER_TIMEOUT)
         await app.send_message(chat_id, f"Done! Download: {short}")
         await update_task(task_id, {"status": "done", "file_message_id": sent.message_id})
@@ -697,7 +691,6 @@ async def process_task(task_id: str):
         await app.send_message(chat_id, f"Upload failed: {e}")
         await update_task(task_id, {"status": "failed", "error": str(e)})
     finally:
-        # cleanup
         try:
             os.remove(input_path)
         except Exception:
@@ -738,7 +731,7 @@ async def _main():
     server = uvicorn.Server(config_uvicorn)
     async with app:
         api_task = asyncio.create_task(server.serve())
-        logger.info("Bot started; API server running on port %s", API_PORT)
+        logger.info("Bot started❤️; API server running on port %s", API_PORT)
         await api_task
 
 if __name__ == "__main__":
