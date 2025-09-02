@@ -7,3 +7,4 @@ shortzy
 pytz 
 uvicorn
 fastapi 
+motor
