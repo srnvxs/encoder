@@ -729,10 +729,22 @@ async def _main():
     await ensure_bot_config()
     config_uvicorn = uvicorn.Config(api_app, host="0.0.0.0", port=API_PORT, loop="asyncio", log_level="info")
     server = uvicorn.Server(config_uvicorn)
-    async with app:
-        api_task = asyncio.create_task(server.serve())
-        logger.info("Bot started❤️; API server running on port %s", API_PORT)
-        await api_task
+
+    # Start Pyrogram client
+    await app.start()
+    logger.info("✅ Bot started; API server running on port %s", API_PORT)
+
+    # Run FastAPI in background
+    api_task = asyncio.create_task(server.serve())
+
+    # Keep bot running
+    try:
+        await asyncio.Event().wait()  # keep the loop alive
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        pass
+    finally:
+        await app.stop()
+        logger.info("Bot stopped")
 
 if __name__ == "__main__":
     try:
