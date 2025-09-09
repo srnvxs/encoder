@@ -1,4 +1,5 @@
 
+
 import os
 import sys
 import asyncio
@@ -721,33 +722,47 @@ async def _main():
     config_uvicorn = uvicorn.Config(api_app, host="0.0.0.0", port=API_PORT, log_level="info")
     server = uvicorn.Server(config_uvicorn)
 
-
     await app.start()
     logger.info("✅ Bot started; API server running on port %s", API_PORT)
 
-    # Run FastAPI in background
     api_task = asyncio.create_task(server.serve())
 
     try:
- 
-        await asyncio.gather(
-            
-            app.idle(),
-   
-            api_task
-        )
+        stop_event = asyncio.Event()
+        
+        def signal_handler():
+            stop_event.set()
+        
+        try:
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, signal_handler)
+        except (ImportError, NotImplementedError):
+            # Windows doesn't support signal handlers
+            pass
+        
+        await stop_event.wait()
+        
     except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Shutting down gracefully...")
     finally:
+        logger.info("Stopping services...")
         
-        await app.stop()
-       
         api_task.cancel()
         try:
             await api_task
         except asyncio.CancelledError:
             pass
+        
+
+        await app.stop()
+        
         logger.info("Bot & API stopped")
 
 if __name__ == "__main__":
+    try:
+        import signal
+    except ImportError:
+        signal = None
+    
     asyncio.run(_main())
