@@ -1,12 +1,3 @@
-#!/usr/bin/env python3
-"""
-bot_single_fixed.py
-Single-file Telegram video processing bot (fixed & cleaned).
-- Pyrogram (async)
-- Motor (MongoDB)
-- Async ffmpeg with -progress pipe:1 parsing
-- Inline UI, per-task logs, FastAPI API, shortener, auth, admin
-"""
 
 import os
 import sys
@@ -730,7 +721,7 @@ async def _main():
     config_uvicorn = uvicorn.Config(api_app, host="0.0.0.0", port=API_PORT, log_level="info")
     server = uvicorn.Server(config_uvicorn)
 
-    # Start Pyrogram client
+
     await app.start()
     logger.info("✅ Bot started; API server running on port %s", API_PORT)
 
@@ -738,16 +729,25 @@ async def _main():
     api_task = asyncio.create_task(server.serve())
 
     try:
-        await asyncio.Event().wait()  # keep alive until interrupted
+ 
+        await asyncio.gather(
+            
+            app.idle(),
+   
+            api_task
+        )
     except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Shutting down gracefully...")
     finally:
-        # stop bot
+        
         await app.stop()
-        # stop API server
+       
         api_task.cancel()
         try:
             await api_task
         except asyncio.CancelledError:
             pass
         logger.info("Bot & API stopped")
+
+if __name__ == "__main__":
+    asyncio.run(_main())
